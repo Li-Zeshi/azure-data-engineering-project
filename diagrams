@@ -1,0 +1,8 @@
+azure-data-engineering-project/
+│
+├── README.md                 ← Key project documentation
+├── notebooks/                ← Jupyter Notebooks or PySpark code
+├── diagrams/                 ← Architecture diagrams (draw.io or PNG)
+├── screenshots/              ← ADF pipeline, SQL output, Blob snapshots
+├── docs/                     ← Technical notes, lessons learned
+└── data-sample/              ← Sample input/output datasets (optional)
