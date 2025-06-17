@@ -1,1 +1,239 @@
+如何在azure 搭建数据管道，批量复制azure sql database的数据并进行清洗和转化，这里是一份保姆级教程：
+
+一、data ingestion
+目标：将 SQL Server 多张表动态复制到 Azure Data Lake Storage Gen2 的 Bronze 层
+整体架构概览 [SQL Server] → [ADF Pipeline] → [ForEach 循环] → [Copy Activity] → [Parquet Dataset] → [ADLS Gen2 /bronze/SchemaName/TableName/]
+
+新建一个azure sql database 选择示例数据，azure会自动导入我们需要使用的源数据AdventureWorks数据库
+AdventureWorks数据库是微软为SQL Server提供的流行且广泛使用的示例数据库。它是学习和实践SQL查询、数据库设计和各种数据相关任务的绝佳资源。
+现在我需要把在 SQL Server 下Azure SQL Database 中存入的AdventureWorks里的表批量全部通过adf复制过来
+在我的 Udemy 项目中，这个SQL就是用在pipeline的Lookup Activity 里，来获取 SalesLT 下所有表名，然后用 ForEach 活动对每个表执行一个 Copy 操作，实现动态数据管道。
+
+Lookup 设置新建好含有AdventureWorks数据库的数据集以后，点击查询，在查询框里写如下语句：
+SELECT s.name AS SchemaName, t.name AS TableName  
+# Selects the name of the schema and the name of the table, and assigns them aliases SchemaName and TableName.
+FROM sys.tables t  
+# sys.tables is a system catalog view that contains a row for each user-defined table in the current database. Alias t is used for brevity.
+INNER JOIN sys.schemas s ON t.schema_id = s.schema_id  
+# Performs an inner join between sys.tables and sys.schemas using the schema_id field, so we can find out which schema each table belongs to.
+WHERE s.name = 'SalesLT'; 
+# Filters the results to only include tables that belong to the schema named 'SalesLT'
+
+
+你可能会问：
+    # 1 sys 是什么？
+    sys 是 SQL Server 中的“系统架构（schema）”，也就是系统对象所在的专属 schema。它包含了数据库引擎维护的系统视图（System Views）、函数、存储过程等。
+    就像你写表用 SalesLT.Customer 来指定 schema 为 SalesLT，
+    sys.tables 就是指 sys 这个系统 schema 下面的 tables 系统视图。
+    把数据库看成一个图书馆：普通用户建的表（如 SalesLT.Customer）是普通图书。sys.tables、sys.columns、sys.schemas 等是图书馆的“目录索引”
+    sys 是专门存这些“目录、索引、管理信息”的专属区域
+    Schema 是数据库中用来组织对象（表、视图、存储过程等）的一种方式。类似于文件夹，把不同表分类归组。一个用户可以有多个 schema，比如 SalesLT, HR, dbo, Production 等。
+
+    # 2 为什么 ADF 和数据工程常用 sys？
+    因为数据工程师要做“自动化 + 动态数据管道”，必须先知道：
+    哪些表存在？
+    哪些列是啥？
+    属于哪个 schema？
+    这些信息都在 sys 下的系统视图中，尤其是：sys.tables  sys.columns  sys.schemas
+    
+    # 3 sys.tables  和 sys.schemas 里有什么？ 
+    sys.tables 和 sys.schemas 是两个 SQL Server 系统视图。用于列出数据库中所有用户定义的表（user tables）。
+
+ sys.tables包含的典型字段有：
+| 列名           | 含义                  |
+| --------------| ------------------- |
+| object_id     | 表的唯一 ID（可用于查找列、约束等）｜ 
+| name          | 表的名称                |
+| schema_id     | 表所属的 schema ID      |
+| create_date   | 创建时间                |
+| modify_date   | 最后修改时间              |
+| is_ms_shipped | 是否系统内部表（我们通常只看 `0`） |
+
+     # sys.schemas 是什么？
+sys.schemas 是一个系统视图，记录数据库中所有的 schema（模式）的定义。
+sys.schemas 中包含字段：
+| 列名          | 含义                           |
+| -------------| ------------------------------|
+| schema_id    | Schema 的唯一 ID（用来连接 sys.tables）|
+| name         | Schema 的名字，例如 SalesLT, dbo  |
+| principal_id | 创建这个 schema 的用户 ID（通常用不着）  |
+
+每张表（sys.tables）都属于某个 schema（sys.schemas）。它们之间通过 schema_id 连接：
+FROM sys.tables t
+JOIN sys.schemas s ON t.schema_id = s.schema_id
+这样可以查出：
+每张表的名字（来自 sys.tables.name）
+每张表所属的 schema（来自 sys.schemas.name）
+
+可视化理解：
+┌───────────────┐        ┌────────────────┐
+│   sys.tables  │        │   sys.schemas  │
+├───────────────┤        ├────────────────┤
+│ name          │        │ name           │
+│ schema_id  ───────────▶│ schema_id      │
+└───────────────┘        └────────────────┘
+
+最终结果（查询输出长这样）：
+| SchemaName | TableName |
+| ---------- | --------- |
+| SalesLT    | Address   |
+| SalesLT    | Customer  |
+| SalesLT    | Product   |
+| ...        | ...       |
+
+  # 为什么数据工程中常用它们？
+    在数据管道中，你经常需要动态获取：某个 schema 下有哪些表？自动循环处理这些表的数据。
+    用 sys.tables 和 sys.schemas 查询就能实现“从数据库自身结构中获取信息”的能力，这就是所谓的 "元数据驱动的管道（Metadata-driven pipeline）"
+    这个在 ADF 中非常常见，特别是在动态构建 Copy Activity 或 Lookup Activity 的数据源时。
+
+接下来在adf中新建数据管道
+然后添加look up活动
+设置选择源数据集，连接sql server，选择数据库，不用选择任何表。
+设置-使用查询 写sql查询语句-然后点上面的preview data
+然后我们点击debug运行这个look up activity。运行成功我们检查output 里面是json格式储存的我们用sql查询出的表格信息。表的信息都存在output里的'value'这个key对应的值（是个列表）里
+然后搜ForEach activity拖到iook up旁边。 点ForEach activity点设置，底下有个item点添加动态内容 [Alt+Shift+P]
+点击Lookup for all tables 活动输出自动生成表达式，手动结尾.value
+
+    # 为什么look up要连接foreach？ForEach 活动的本质是什么？
+    在 Azure Data Factory (ADF) 中，ForEach 活动的本质是让你对一组元素（数组）进行迭代，逐个执行相同的子操作（例如 Copy 活动），实现批量自动处理的目的。
+    可以把它理解成 Azure Data Factory 里的 “循环语句”，就像 Python 中的：for item in list: 
+    ForEach 活动 里面加入的活动就相当于Python 中的：for item in list:  之后对item进行的操作 比如print（item）等
+    ForEach 的核心本质：
+    输入是一个数组，你需要传给 ForEach 一个数组作为迭代对象，数组可以来源于：手动写死的值（例如：[1,2,3]） / 从 Lookup 活动中查询数据库表、文件等 / 管道参数传入
+    每一次循环都执行一组子活动，你可以在 ForEach 中放入一个或多个活动，例如：Copy Data、Execute Pipeline、Set Variable、If Condition、Web Activity 等
+    这些活动会对 item()（即当前这次循环的项）进行处理。
+    # 支持并发执行
+    你可以设置 ForEach 的 “并发度（Batch Count）”，比如：
+    并发度为 1：顺序执行每个项；
+    并发度为 5：最多同时处理 5 个项，加快速度。
+    
+
+清楚了ForEach 活动的本质，接下来我们继续搭建自动化复制表格进目标数据湖的数据管道
+在ForEach 里点活动，点编辑，在内部添加copy activity。选择数据集，在下面写查询语句@{concat('select * from',item().SchemaName,'.',item().TableName)}
+    这个查询语句是什么意思呢？
+    这是一段 ADF 的表达式语言（即 dynamic content expressions），用于动态构造 SQL 查询语句。查询语句的目的是不断迭代直到select完所有的表
+    1 @{...}：这是 ADF 的表达式语法，表示其中的内容是 动态计算的，而不是静态文本。
+    2 concat(...)：是 ADF 的字符串拼接函数。
+    3 'select * from '：这是拼接的第一个字符串，表示 SQL 查询的开头。
+    4 item().SchemaName：在 ForEach 循环中，item() 表示当前循环到的那个元素（可能是一个 JSON 对象），.SchemaName 是它的一个字段（值可能是 dbo 或 sales 等）。
+    5 '.'：是连接 schema 和表名的点号（SQL 中完整表名格式是 schema.table）。
+    6 item().TableName：当前项中的表名字段。
+    假设你的 ForEach 正在循环一个这样的数组（从某个 Lookup 活动、Dataset 或参数中传入）：
+    [
+      { "SchemaName": "sales", "TableName": "Customers" },
+      { "SchemaName": "hr", "TableName": "Employees" }
+    ]
+    那么：
+    第一次循环：生成的 SQL 会是select * from sales.Customers
+    第二次循环：生成的 SQL 会是select * from hr.Employees
+    这一过程将会不断迭代直到select完所有的表
+    使用场景：
+    这种写法非常适用于 批量复制多个表的场景，比如：
+    1 从不同的 schema/table 中提取数据；
+    2 自动复制多个表而无需为每个表单独建一个管道；
+    3 动态构建查询语句，提高管道的通用性和自动化程度。
+
+接下来是配置同步sink，我们要把复制过来的数据存在数据湖里。选择sink，新建dataset，选择Azure Data Lake Storage Gen2，选择parquet格式文件。
+  # 为什么选择 Parquet 格式作为 Sink 文件格式？
+    这是个非常关键的问题，涉及到 数据湖建模标准、性能优化 和 数据工程实践中的文件格式选择策略。
+    为什么选 Parquet 格式作为 Sink？
+    1. 🧠 Parquet 是列式存储格式，适合分析型查询
+    相比 CSV/JSON 这类 行式格式，Parquet 的 列式存储 能够只读取分析时真正需要的列，显著减少 I/O 和查询延迟。
+    特别适合用于 Spark、Databricks、Synapse、Power BI 等下游数据分析工具。
+    2. 🚀 高压缩率 + 高性能
+    Parquet 格式默认支持 压缩（如 Snappy），体积更小，传输和存储效率更高。
+    适合大数据量场景，尤其是在数据湖中存储“青铜层”原始数据时，用 Parquet 可以节省大量成本。
+    3. 🔄 强类型 + Schema 支持
+    Parquet 是支持 schema 的格式，ADF 能够明确字段类型（如整数、浮点、时间戳等），不会像 CSV 那样丢失类型信息。
+    方便数据治理和后续的数据验证、转换。
+    4. 🧱 符合数据湖层级建模标准（Bronze → Silver → Gold）
+    在 Lakehouse 架构中，青铜层（Bronze Layer）用于保存原始数据副本；
+    这些数据多数采用 Parquet，因为它：不易被修改（Immutable），易于后续转换为银层（清洗后结构化数据），更适合做批处理和 SQL 查询分析
+
+接下来我们要设置文件存储路径最开头的文件系统的名字
+选择我们之前创建的链接的服务 AzureDataLakeStorage1，选择之前创建的储存的文件路径bronze青铜层
+我们点击sink下面指定的数据集parquetcopytable 进去之后设置两个参数，一个是SchemaName 一个是TableName 
+返回到数据管道中我们就可以看到sink下面出现了两个参数，SchemaName 和 TableName 我们可以输入动态的值@item().SchemaName和@item().TableName
+  # 为什么要设置 SchemaName 和 TableName 参数？
+    在 ADF 的 Copy Data 活动中，你设置 Sink（目的地）为 Data Lake Storage Gen2 的 Parquet 文件格式，但你希望：每张表的数据被分别保存为一个 Parquet 文件，而不是都写入同一个文件。
+    因此你需要让 ADF 知道：当前这张表叫什么（TableName）；它属于哪个 schema（SchemaName）。从而决定文件保存在哪里。
+    为此需要设置 Sink 数据集中的两个参数：SchemaName 和 TableName，并在 ForEach 的每次循环中动态传入。
+  # 为什么是 @item().SchemaName 和 @item().TableName？
+    因为在 ForEach 中循环的是一个 数组对象，每一项都像这样：
+    {
+      "SchemaName": "sales",
+      "TableName": "Customers"
+    }
+    而 ADF 中 item() 表示当前循环项。所以：
+    @item().SchemaName 表示当前项的 schema 名称，如 sales
+    @item().TableName 表示当前项的表名，如 Customers
+
+接下来我们要设置文件存储路径中间的directory目录名，添加动态内容以生成目录结构  
+    # 添加动态内容 @{concat(dataset().SchemaName,'/',dataset().TableName)}代码的含义：？
+    这段表达式涉及 ADF 的 数据集参数化机制 和 文件存储路径的自动生成逻辑。
+    在 ADF 中：
+    dataset() 是一种表达式函数，用于访问当前数据集（Dataset）中的参数。
+    你在创建 Parquet 类型的数据集时，为了让不同表的数据能保存到不同的文件夹，你设置了两个参数：SchemaName、TableName
+    所以你可以通过：dataset().SchemaName来访问这些参数的值，并将它们用在路径配置中。
+    为什么要设置目录路径？用于填充 是为了填Parquet 文件的 directory（目录）字段，把数据保存到如下结构的路径下：/bronze/sales/Customers/
+    原因包括：
+    | 好处        |               说明                                                                
+    | ----------- | ----------------------------------------------------------------- |
+    | 📂 分类清晰    | 不同 Schema/表名的表各存在不同文件夹，方便管理和下游读取                                  
+    | 📈 支持增量写入 | 将不同批次的数据写入同一目录下，不断追加                                              
+    | 🧹 清洗管理方便| 可以批量删除某个 Schema 下的全部文件或表数据                                        
+    | 🔁 可迭代复用  | 下游系统如 Spark、Databricks 可以用 wildcard (`bronze/*/*.parquet`) 读入所有文件 
+
+接下来我们设置文件储存路径最后的文件名
+同样添加动态内容，代码：@{concat(dataset().TableName,'.Parquet')}
+    # 这段表达式是用来动态生成每个导出文件的名字，确保你复制的每张表都能保存成独立的 .parquet 文件。
+    这句代码的意思是：生成当前表名 + .parquet 后缀组成的文件名
+    例如：
+    当前表是 Customers → 生成文件名 Customers.Parquet
+    当前表是 Invoices → 生成文件名 Invoices.Parquet
+
+也就是说，通过设置文件存储路径最开头的文件系统的名字 / 设置文件存储路径中间的directory目录名 / 设置文件储存路径最后的文件名 三步，最终你将导出为：
+bronze/sales/Customers/Customers.parquet
+bronze/hr/Employees/Employees.parquet
+……
+……
+……
+
+
+流程图示
+1 ForEach 输入数组：
+[
+  { "SchemaName": "sales", "TableName": "Customers" },
+  { "SchemaName": "hr", "TableName": "Employees" }
+]
+2 ForEach 每次循环设置：
+Source SQL: select * from @{item().SchemaName}.@{item().TableName}
+Sink 参数：
+SchemaName = @item().SchemaName
+TableName = @item().TableName
+3 Sink 数据集路径设置：/bronze/@{dataset().SchemaName}/@{dataset().TableName}.parquet
+
+下一步我们点击Publish all发布全部，运行管道可以用debug 也可以add trigger
+这里我们add trigger 添加触发器 点tigger now我们能触发一次
+第一次运行失败：
+问题在于在 Copy 活动的 Source Query 里写了这样一句表达式：@{concat('select * from', item().SchemaName, '.', item().TableName)}
+注意： 'from' 和 item().SchemaName 之间没有空格，拼接后变成了：select * fromSalesLT.Customers 导致这就是语法错误！导致copy 失败
+改掉就ok了
+
+
+关于添加动态内容的原因的整理：
+| 使用位置                   | 动态内容写法                                                                | 意义        | 原因     |
+| ----------------------    | -----------------------------------------------------------------------  | ---------   | ------ |
+| ForEach → Items           | `@activity('Lookup Tables').output.value`                                | 获取所有表数组   | 用于循环   | 
+# .output.value 表示 Lookup 查询返回的所有结果记录（即多个表名、模式名组合）。ForEach 需要一个数组类型的输入，才能循环执行 Copy 活动。
+| Copy Source → Query       | `@{concat('select * from ', item().SchemaName, '.', item().TableName)}`  | 动态构建 SQL  | 每张表都不同，拼接成每一张表的 SQL 查询语句 |
+| Copy Sink → 参数传入        | `@item().SchemaName` `@item().TableName`                                | 将表信息传给数据集 | 用于路径生成 |
+# ADF 不直接支持在 Sink 的路径中写 item().，所以你需要将它传给 Parquet 数据集的参数。
+| Parquet Dataset → 目录路径  | `@{concat(dataset().SchemaName, '/', dataset().TableName)}`             | 建立目录结构    | 按表分类存储 ，dataset().SchemaName 是访问传进来的参数（不是 item(|
+| Parquet Dataset → 文件名   | `@{concat(dataset().TableName, '.parquet')}`                             | 文件命名      | 每表一个文件 ，拼接表名与文件扩展名，确保每个表的数据导出为单独文件|
+
+
+
+
+
 
