@@ -235,5 +235,389 @@ TableName = @item().TableName
 
 
 
+二、data transform
+打开我们之前创建的databricks。
+ Databricks 教学内容常见结构
+Databricks 基础概念
+    什么是 Databricks（Lakehouse 架构）
+    它与 Azure、Spark、Delta Lake 的关系
+    Workspace、Cluster、Notebook 的作用和使用方法
+工作环境设置
+    创建 Azure Databricks 服务
+    配置 Cluster（通常用 Standard_DS3_v2、Runtime 版本）
+    连接 Data Lake、SQL Database、ADF 等资源
+使用 Notebook 编程
+    使用 %python、%sql、%scala 魔法命令
+    运行 PySpark 代码读取和处理数据
+    数据清洗、转换、分析流程实操
+读写数据（尤其是与 ADF 配合）
+    读取 CSV、Parquet、Delta 格式
+    写入到 Azure Data Lake 或 Delta Table
+    使用 spark.read.format() 和 df.write.format() 等方法
+Delta Lake 实战
+    建立增量处理（SCD Type 1/2）
+    使用 MERGE、VACUUM、OPTIMIZE
+    管理版本历史和时间旅行（Time Travel）
+与 ADF 配合自动化流程
+    ADF 调用 Notebook
+    参数传递、调试和监控
+    构建端到端的数据管道
+
+我们点击compute 点击create compute
+先改一下cluster的名字
+Azure Data Lake Storage 凭据传递下点击勾选启用用户级数据访问的凭据传递功能，这样我们才能把databricks连接到data lake
+创建一个compute
+同时我们点击工作区，点击workspace-shared-点create notebook。编程语言可以自选，可以选择哪个cluster
+我们在notebook中试着访问datalake，这里先按照老师教的用旧方法挂载，
+我们在官方文档‘使用 Microsoft Entra ID 凭据直通访问 Azure Data Lake Storage’这篇下面找到
+-使用凭据直通将 Azure Data Lake Storage 装载到 DBFS-  在这里复制python代码并修改其中的我们个人创建的部分：
+    # 需要改那些信息？
+source = "abfss://<container-name>@<storage-account-name>.dfs.core.windows.net/", 是数据湖的路径
+<container-name> 我们创建的是bronze，<storage-account-name>我们创建的是datalake4project
+因此要改成：source = "abfss://bronze@datalake4project.dfs.core.windows.net/"
+mount_point = "/mnt/<mount-name>", 这是要指定访问bronze里的数据：
+因此要改成mount_point = "/mnt/bronze", 
+
+下一步建议
+既然你没启用 Unity Catalog：
+✅ 你可以用 dbutils.fs.mount() 来连接 ADLS Gen2 或 Blob Storage
+✅ 支持使用 dbutils.fs.ls("/mnt/xxx") 来访问
+✅ 可以继续使用以 /mnt/... 开头的 DBFS 路径在 Spark、pandas、SQL 中读取数据
+    # dbutils.fs.ls("/mnt/bronze")是什么意思？
+        在 Databricks 文件系统（DBFS）中查看 /mnt/bronze 这个挂载目录下的内容，相当于你在操作系统中执行 ls（list directory）命令。
+        | 部分              | 含义                                       |
+        | --------------- | ---------------------------------------- |
+        | `dbutils`       | 专属的工具类库（Databricks Utilities），用于在 Notebook 中执行各种 Databricks 特有的操作                       
+        | `fs`            | 文件系统（FileSystem）模块                       |
+        | `ls()`          | 列出目录内容（list）                             |
+        | `"/mnt/bronze"` | 挂载目录路径，通常是你通过 `dbutils.fs.mount()` 挂载的存储 |
+
+    # 为什么要写 /mnt 开头？
+        因为 /mnt 是 Databricks 文件系统（DBFS）中专门用于“挂载外部存储”的目录。
+        你通过 dbutils.fs.mount() 挂载 Azure Data Lake / Blob Storage 时，必须指定一个本地路径作为挂载点（mount point），
+        这个路径通常习惯写在 /mnt 下,我们再加上schema名就可以得到全部表所在的不同文件夹：
+
+运行dbutils.fs.ls("/mnt/bronze/SalesLT")
+ 
+接下来我们复制原来的python代码，改一下原来代码里的bronze变为silver和golden建立银层和金层即可
+现在我们完成了data transform的第一部分，安装数据湖。
+我们可以先读取bronze的数据进行数据转化后加入到silver层，这是第一次转化。
+然后我们读取silver里的数据进行进一步转化，最后转入gold层
+
+数据转化第二课
+我们打开azure data studio，点开address 这张表，可以看到已经是比较干净的结构化的数据，我们可以学习如何使用databricks
+对修改日期这一列的数据做日期格式的转化，从日期时间格式修改为日期格式。还有其他的表也需要把日期时间格式修改为日期格式。
+我们学怎么在databricks中使用pyspark。
+首先我们先再创建两个笔记本用来执行bronze to silver & silver to gold的操作。
+
+bronze to silver 笔记本执行的操作：
+第一步是获取数据湖中bronze中的数据:
+dbutils.fs.ls('/mnt/bronze/SalesLT/')
+在这一层中我们要将转化好的数据存入silver层，因此我们也调用silver层
+dbutils.fs.ls('/mnt/silver/')
+接下来我们定义一个路径变量 input_path,指定我们要进行数据清洗的文件的路径
+input_path = '/mnt/bronze/SalesLT/Address/Address.Parquet/'
+现在使用 Spark 读取 Azure 数据湖中存储的 Parquet 格式数据文件，并加载为 DataFrame。从 input_path 路径中加载数据
+df = spark.read.format('parquet').load(input_path) # 将结果保存在变量 df 中，类型是 Spark 的 DataFrame。
+    
+    # 读取后你可以干什么？：
+        df.show()         # 显示前 20 行
+        df.printSchema()  # 显示字段和数据类型
+        df.count()        # 看有多少行
+        或者进行清洗处理、转换、写入 silver 层等操作。
+    # 这里的 spark 是什么意思？spark 是干嘛的？
+        Apache Spark 是一个用于处理大规模数据的分布式计算引擎，特点是：
+        1能处理海量数据（比如几亿行表）
+        2速度比 Hadoop MapReduce 快 10~100 倍
+        3支持多种语言：Python、Scala、Java、SQL
+        4支持批处理、流处理、机器学习、图计算
+
+        类比生活中事物」来形容 Spark，可以说：
+        spark 就像一个厨师大脑，你告诉它食材在哪（比如 Parquet 文件），怎么处理（比如选前10名、按地区分组），
+        它就能自动调用很多厨房小助手（执行器）并行完成任务。
+
+        #在 Databricks 中，spark 是你用来读取、分析、处理大数据的核心对象，代表了一个正在运行的 Spark 引擎。
+        它能处理海量数据，并支持丰富的数据操作功能，是数据工程、数据科学的关键工具。
+        #在这里spark 是一个指向 SparkSession 的变量，代表一个正在运行的 Apache Spark 引擎实例。
+        在 Databricks 中，spark 是自动创建的，表示你可以直接用它来：
+        读取数据（CSV、Parquet、JSON、数据库等）、处理大规模数据（清洗、转换、聚合等）、执行 SQL 查询、写出数据（到文件或数据库）
+
+接下来我们display(df)看看。display(df) 是 Databricks Notebook 中专用的函数，用于以表格形式直观地展示 Spark DataFrame 的内容。
+    # 什么是display函数：
+        display(df) 是 Databricks 独有的最常用的函数之一，用来以表格和图表的形式直观查看 Spark DataFrame 的数据内容，
+        比 df.show() 更适合做可视化分析和交互操作。display() 不是标准 Python 或 PySpark 的函数，只能在 Databricks Notebook 中使用。
+        如果你在 Jupyter Notebook 运行，会报错。
+        使用 display(df)：输出是交互式表格：可点击、可分页、可生成图表
+
+我们要用格式化后的日期字符串（如 '2023-06-01'）直接替换掉原来的 modifiedData 列
+把原本的 modifiedData 列 直接覆盖为一个新值，这个新值是：
+（先把 modifiedData 从字符串转换成时间戳，再将它当作 UTC 时间处理，最后格式化成 yyyy-MM-dd 形式的字符串（只保留日期）。再把原本的 modifiedData 列直接覆盖为一个新列）
+这个非常适合在数据清洗阶段做字段简化或标准化。
+
+因此我们从 PySpark 的函数模块中，引入两个常用的日期时间函数：from_utc_timestamp 和 date_format，用于处理 Spark DataFrame 中的时间字段。
+from_utc_timestamp(col, timezone) 用于把 UTC 时间转换为指定时区的本地时间 from_utc_timestamp(df["timestamp"], "Asia/Shanghai")
+date_format(col, format_str)可以把时间列格式化成字符串，指定你要的格式 date_format(df["timestamp"], "yyyy-MM-dd")
+
+from pyspark.sql.functions import from_utc_timestamp,date_format
+from pyspark.sql.types import TimestampType
+df = df.withColumn(
+    "modifiedData",
+    date_format(from_utc_timestamp(df["modifiedData"].cast(TimestampType()), "UTC"), "yyyy-MM-dd")
+)
+    # 为什么是 pyspark.sql？
+        PySpark 是 Spark 的 Python API，整个包名是 pyspark，
+        pyspark.sql 是 PySpark 中专门用于结构化数据处理的模块，里面的 functions 提供了丰富的 DataFrame 操作函数，types 提供了列的数据类型定义。
+        你要处理时间格式、列类型，就必须从 pyspark.sql 引入这些模块。
+        Spark 中最核心的概念是 DataFrame，而 DataFrame 相关的所有操作、函数、类型，都被统一组织在 pyspark.sql 这个模块下。
+        第一行：from pyspark.sql.functions import from_utc_timestamp,date_format 是导入 SQL 模块中的函数（如时间格式转换）；
+        第二行：from pyspark.sql.types import TimestampType 是导入 SQL 模块中的数据类型（你要把字符串转换成 TimestampType()，才能做时间函数处理）；
+        这些函数和类型 只能 用在 DataFrame 处理上，是 Spark SQL（结构化处理）的一部分。
+        模块结构图理解：
+        pyspark
+        │
+        ├── sql              ← 专门处理结构化数据（DataFrame、SQL）的模块
+        │   ├── functions.py ← 各种 DataFrame 专用函数（如 from_utc_timestamp, date_format）
+        │   └── types.py     ← 各种数据类型定义（如 TimestampType, StringType 等）
+        │
+        ├── ml               ← 机器学习模块
+        ├── streaming        ← 实时流处理模块
+        └── rdd              ← 原始弹性分布式数据集模块（RDD）
 
 
+    # 这些函数都是什么意思呢？
+        1 最外层withColumn("modifiedData", ...)
+        把整个表达式结果添加到原 DataFrame 中，覆盖原来的列名为 "modifiedData"
+        2 date_format(..., 'yyyy-MM-dd')   date_format语法是date_format(col, format_str)
+        可以把这个 timestamp 格式化为字符串，只保留“年月日”：
+        输入：2023-06-01 15:30:00
+        输出：'2023-06-01'
+        3 from_utc_timestamp(..., 'UTC') 
+        把转换后的 timestamp 解释为 UTC 时间，并返回对应的带时区时间（或本地时间）
+            ## 什么是 UTC 时间？为什么要转换成 UTC 时间？
+                UTC（Coordinated Universal Time）：是“世界标准时间”，所有服务器和数据系统处理时间时，通常都用 UTC 作为统一基准。
+                它是全球通用的时间标准，不受任何地区、夏令时、国家法定时区影响。
+                为什么数据存储要用 UTC 时间？大数据系统（尤其是云平台）为了保证跨时区、跨地区的数据统一性，常常把时间字段都存成 UTC 格式
+                | 作用   | 原因            |
+                | ---- | ------------- |
+                | 全球统一 | 不受本地时间影响      |
+                | 易于对比 | 跨地域计算、同步一致    |
+                | 安全准确 | 避免夏令时、时区变动等问题 |
+                同时Spark 不知道你给它的 timestamp 是在哪个时区存的。你得手动告诉它：“这个时间字段是 UTC 的”，它才知道怎么正确转换成你本地时间。
+        
+        4 df["modifiedData"].cast(TimestampType()
+        将该列从字符串强制转换为 timestamp 类型，变成真正的“日期+时间”对象。
+            ## 为什么要用 .cast(TimestampType())？
+                因为：你从 CSV / JSON / Parquet / 数据库中读出来的时间字段，常常是字符串（StringType）
+                Spark 不会自动识别这些字符串为时间，除非你手动转换。
+                TimestampType() 是 Spark 中的一种数据类型，用来表示“时间戳”格式的数据，即包含“年月日 + 时分秒”的时间信息。
+                所以你需要使用 .cast(TimestampType()) 把它转为 timestamp 类型，才能做时间运算、比较、格式化等操作
+        
+接下来我们要对其他表都进行这个操作
+在databricks的notebook中，我们可以用不同的编程语言，通过一个magic command就行 
+在一个单元格写% SQL，单元格的编程语言就会变为sql 我们就可以用sql了
+在单元格里写%md 就会自动变为注释的markdown语言，我们可以写笔记
+
+接下来我们使用 Python 代码读取datalake brozen路径下的文件（或目录）列表，并提取文件（或目录）的名称，用来生成一个表名列表。
+table_name = [] # # 初始化一个空列表，准备用来存放表名
+for i in dbutils.fs.ls('/mnt/bronze/SalesLT') # 遍历路径/mnt/bronze/SalesLT 下的所有文件或目录
+    table_name.append(i.name.split('/')[0]) # 将目录名去掉/，只取名字部分添加到列表中
+    # i是什么？
+        dbutils.fs.ls() 会返回一个包含多个 FileInfo 对象 的列表，每个 i 就是其中的一个 FileInfo 对象，表示路径下的一个文件或目录。
+        该目录下有这些文件：
+        mnt/bronze/SalesLT/Customer/Customer.parquet
+
+        dbutils.fs.ls('mnt/bronze/SalesLT/') 返回的是这样的列表,每个 i 就是其中的一个 FileInfo 
+        [
+          FileInfo(path='mnt/bronze/SalesLT/Customer/', name='Customer/'),
+          FileInfo(path='mnt/bronze/SalesLT/Product/', name='Product/')
+        ]
+    # 这时 i.name 是什么? 
+        第一次循环时：i.name = 'Customer/'  第二次循环时：i.name = 'Product/'
+        所以i.name.split('/')[0]，当 i.name 是目录名（结尾带 /）时，它能提取目录主名。
+        'Customer/'.split('/') -> ['Customer', '']
+        ['Customer', ''][0] -> 'Customer'
+
+现在我们已经拿到了所有表名的列表table_name 。我们可以对所有表进行转化
+代码：
+
+from pyspark.sql.functions import from_utc_timestamp,date_format
+from pyspark.sql.types import TimestampType
+for i in table_name:
+    path = '/mnt/bronze/SalesLT/' + i + '/' + i + '.Parquet' 
+    df = spark.read.format('parquet').load(path)
+    column = df.columns # 表示 DataFrame df 的所有列名，以 Python 列表（list） 的形式返回。可以用 df.columns 来动态获取所有列名
+    for col in column:
+        if 'Date' in col or 'date' in col:
+            df = df.withColumn(col,date_format(from_utc_timestamp(df[col].cast(TimestampType()),'UTC'),'yyyy-MM-dd')) # 为什么这的col不加'',这是因为你要传的是变量名，而不是字符串常量。
+    output_path = '/mnt/silver/SaleLT/' + i + '/'
+    df.write.format('delta').mode('overwrite').save(output_path) 
+
+    # if 'Date' in col or 'date' in col: 这里不需要用正则表达式就可以判定列名里是否含'Date' or 'date'  了吗？
+        'Date' in col or 'date' in col这个判断的意思是：只要列名里包含 'Date'（区分大小写）或 'date'，就返回 True。
+        什么时候需要正则表达式？
+        如果你想判断得更灵活或更复杂，那你可以用 re 模块（正则表达式）：
+        比如：
+        不区分大小写地判断是否包含 'date'
+        匹配字段名结尾是 '_date' 或 'Date$'
+        只匹配整个单词，而不是像 updated, created 这种
+
+    # df.write.format('delta').mode('overwrite').save(output_path)的含义？
+        把 DataFrame df 按照 Delta 格式 存储到 output_path 路径下；如果路径已有数据，就强制覆盖。
+        把 DataFrame 写入存储系统的标准写法
+        1. .write 是什么？
+        df.write 是 DataFrameWriter 对象，是 DataFrame 的一种“输出接口”。
+        它允许你将 DataFrame 写入多种存储系统：如 Parquet、Delta Lake、CSV、JDBC、Hive、S3 等。
+        2. .format('delta') 是什么？
+        这是指定写入的文件格式。'delta' 表示用 Delta Lake 的格式存储，这是一个支持ACID事务、版本控制、增量处理的格式，是 Databricks 推荐格式。
+        常见的 format() 参数还有：
+        | 格式          | 描述                 |
+        | ----------- | ------------------ |
+        | 'parquet' | 高效列式存储格式，支持 schema |
+        | 'csv'     | 简单的文本格式            |
+        | 'json'    | 写成 JSON 文件         |
+        | 'delta'   | 支持事务的高级数据湖格式       |
+        3. .mode('overwrite') 是什么？
+        这是指定写入模式，常见有：
+        | 模式            | 含义说明                  |
+        | ------------- | --------------------- |
+        | 'overwrite' | 如果目标路径已经存在，会覆盖原数据 |
+        | 'append'    | 追加写入，不会删除原数据      |
+        | 'error'（默认） | 如果目标已存在就报错            |
+        | 'ignore'    | 如果目标已存在就跳过写入   |
+        4. .save(output_path) 是什么？
+        这是最后一步，指定写入路径。
+
+# parquet的书写规范
+虽然 .Parquet 没问题，建议你以后都使用小写 .parquet，因为：
+小写 .parquet 是行业惯例；容易和代码风格统一；跨平台（Linux、Windows、S3、ADLS）更稳妥；避免其他人（或团队成员）误以为你拼错。
+
+
+接下来我们要去进一步进行数据清洗，把silver里的表格转化后存到gold层
+我们要对表格的列名进行操作，把连起来的英文名称按下划线分开:类似ColumnName -> Column_Name
+也就是实现列名从 驼峰命名（CamelCase） 转换为 下划线命名（snake_case），这是是金银铜（Bronze → Silver → Gold）数据湖治理中的常规操作。
+还是和上一层一样
+我们先指定文件路径，然后spark读取文件
+
+dbutils.fs.ls('/mnt/silver/SalesLT')
+dbutils.fs.ls('/mnt/gold')
+input_path = '/mnt/silver/SalesLT/Address/'
+df = spark.read.format('delta').load(input_path)
+display(df)
+from pyspark.sql import SparkSession
+from pyspark.sql.function import col,regexp_replace
+column_names = df.columns
+for old_col_name in column_names:
+    new_col_name = ''.join(['_' + char if char.isupper() and (i == 0 or not old_column_name[i - 1].isupper())else char for i,char in enumerate(old_column_name)]).lstrip('_')
+    df = df.withColumnRenamed(old_column_name,new_column_name)
+
+    # 让i == 0返回'_' + char 不是和.lstrip('_')冲突了吗？
+        i == 0 返回 '_' + char 确实会在开头加 _，而 .lstrip('_') 会把这个多余的开头 _ 删除掉。
+        这是一种“先一律加 _，最后统一清理开头”的策略，虽然 .lstrip('_') 和 i == 0 看起来像是冲突，
+        其实是为了写法简洁、逻辑通用而刻意配合设计的。
+        在这里udemy老师没有写i == 0，因为这段代码中，如果你处理的是第一个字符（i == 0），
+        char = 'C'           # 第一个字符
+        old_col_name[i - 1] = 'r'  → 是小写
+        not old_col_name[i - 1].isupper() = True
+        所以这时候其实也会加上 _，结果是：_Customer 。最后统一再 .lstrip('_') 清除前导下划线。
+        
+        老师的写法简洁但依赖 Python 的负索引行为（-1 是最后一个字符），
+        我们写的 i == 0 or ... 是更安全、更清晰、更易维护的写法。
+        ✅ 即使后期移植到其他语言（不支持负索引），也更具可移植性。
+
+# 导入的模块解释如下：
+SparkSession是用于创建 Spark 应用的入口，用于读取、写入、配置等操作
+col	用于引用 DataFrame 中的列名，例如 col("CustomerID")
+regexp_replace	正则替换函数，可以对列中字符串进行替换
+它们都和 withColumnRenamed() 是配合使用的工具函数，但本身不直接用于重命名。
+我们这里没有使用 col()；
+没有使用 regexp_replace()；
+也没有重新创建 SparkSession；
+Udemy 教程中的这些导入是为了方便后续教学使用（比如处理列内容），
+但在你现在的列名重命名逻辑里，它们不是必须的。如果你没用 col() 或 regexp_replace()，这些导入可以删除。
+
+# 接下来我们用到了一个列表推导式 + 三元表达式（if...else）的组合结构，用来对每个字符做“条件判断式变换”，
+相当于在列表推导式中用了三元表达式，这是 Python 数据清洗中非常常见也非常高效的写法。
+这不是“过滤型”的 if（比如 [x for x in list if x > 0]），而是条件选择型表达式：
+[
+'_' + char 
+if char.isupper() and (i == 0 or not old_col_name[i - 1].isupper()) else char 
+for i, char in enumerate(old_col_name)
+]
+本质上是 [表达式1 if 条件 else 表达式2 for 变量 in 可迭代对象]
+
+每一步的含义： 
+    # 1 什么是 enumerate()？ i 和char的含义是什么？
+        在 Python 中，enumerate() 是一个内置函数，用来在循环中同时获得索引（位置）和元素的值。
+        语法：for index, value in enumerate(iterable):
+        char 是 character（字符）的缩写
+        在 Python 或编程语言中：
+        char → character（单个字符）
+        str → string（字符串）
+        int → integer（整数）
+        bool → boolean（布尔值）
+        dict → dictionary（字典/哈希表）
+        所以你看到：for i, char in enumerate(old_col_name):就是在遍历 old_col_name 字符串的每个“字符”（character）。
+    # 2 char.isupper() 是什么意思？ .isupper() 是 Python 字符串对象（str）的方法，用于判断一个字符是否是 大写英文字母。
+    # 3 i == 0和not old_col_name[i - 1]是什么意思
+        i 是当前字符的索引（位置），从 0 开始； ，char 是当前字符的值（比如 'C'、'u'、's' 等）；
+        i == 0 的作用是：
+        防止当前是第一个字符（i == 0），你去访问 old_col_name[-1]，虽然 Python 不报错（因为 -1 是最后一个字符），
+        但逻辑会出错，你不是真的想访问最后一位。
+        所以条件判断是这样的：'_' + char if char.isupper() and (i == 0 or not old_col_name[i - 1].isupper()) else char
+        意思是：
+        如果当前字母是大写，并且如果它是第一个字符（i == 0）而且它前一个字符不是大写（说明是新单词开头），那么直接在前面加下划线；
+        否则（是连续大写的一部分），就不要加下划线。
+    # 4 ''.join(...) 是什么意思？
+        它可以用空字符串 '' 作为连接符，把一个“字符串列表”拼接成一个“完整字符串”。
+        举个例子：
+        chars = ['C', 'u', 's', 't', 'o', 'm', 'e', 'r']
+        result = ''.join(chars)
+        print(result)
+        输出：Customer
+        我们写的是：new_col_name = ''.join([...])
+        这里的 [...] 是一个列表推导式，生成了像：['_c', 'u', 's', 't', 'o', 'm', 'e', 'r', '_i', 'd']
+        然后用 ''.join(...) 把它拼成：'_customer_id'
+        配合 .lstrip('_') 去掉前面的下划线，得到最终：'customer_id'
+    # 5 为什么是.lstrip('_') 而不是strip()?
+因为.lstrip('_') 中的 l 就是 left（左侧） 的意思
+我们只想去掉字符串开头的下划线，而不是中间或结尾的下划线。
+快速结论：
+| 方法             | 含义               | 示例                                        |
+| -------------- | ------------------ | --------------------------------------------|
+| .lstrip('_') | 只移除左侧（开头）的 '_' | '_customer_id'.lstrip('_') → 'customer_id' |
+| .strip('_')  | 移除左右两侧所有的'_'    | '_customer_id_'.strip('_') → 'customer_id' |
+| .rstrip('_') | 只移除右侧（末尾）的 '_' | 'customer_id_'.rstrip('_') → 'customer_id' |
+
+
+接下来我们要对所有表进行这样的操作，然后把处理好的这些表写进gold层
+和之前broze to silver的非常类似
+table_name = []
+for i in dbutils.fs.ls('/mnt/silver/SalesLT/')
+    table_name.append(i.name.split('/')[0])
+
+for name in table_name:
+    path = '/mnt/silver/SalesLT/' + name
+    print(path)
+    df = spark.read.format('delta').load(path)
+    column_names = df.columns
+    for old_column_name in column_names:
+        new_column_name = ''.join(['_' + char if char.isupper() and (i == 0 or not old_column_name[i-1].isupper()) else char for i,char in enumerate(old_column_name)]).lstrip('_')
+        df =df.withColumnRenamed(old_column_name,new_column_name)
+    output_path = '/mnt/gold/SalesLT/' + name + '/'
+    df.write.format('delta').mode('overwrite').save(output_path)
+
+    # path = '/mnt/silver/SalesLT/' + name能访问到里面的delta文件吗，文件的路径应该是path = '/mnt/silver/SalesLT/Address/XXX'?
+        是的，只要你用的是 Delta 格式，路径写到表目录即可，不需要写到具体的文件（如 .parquet 或 _delta_log 目录）也能成功读取。
+        ✅ 所以这句是 可以成功访问 Delta 表的：
+        为什么可以？
+        Delta 表本质上是一个目录格式的数据表，Databricks 和 Spark 通过读取这个目录下的 _delta_log 元数据来知道：
+        表包含哪些文件
+        schema 是什么
+        有哪些版本
+        只要你指向的是表的主目录（比如 /mnt/silver/SalesLT/Address/），Spark 就能自动加载表。
+    # 所以我们写出去的时候也只需要写到这里就行了
+        output_path = '/mnt/gold/SalesLT/' + name + '/'
+        df.write.format('delta').mode('overwrite').save(output_path)
+        是 写入 Delta 表的标准方式，只要 output_path 指向的是一个表的目录路径，你就可以这样写，系统会自动在该目录下创建：
+        .parquet 数据文件
+        _delta_log/ 元数据目录
