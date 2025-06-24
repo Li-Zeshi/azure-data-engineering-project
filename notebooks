@@ -621,3 +621,340 @@ for name in table_name:
         是 写入 Delta 表的标准方式，只要 output_path 指向的是一个表的目录路径，你就可以这样写，系统会自动在该目录下创建：
         .parquet 数据文件
         _delta_log/ 元数据目录
+
+
+接下来我们的工作是要用adf搭建数据管道，去让bronze to silver和silver to gold变为job
+我们现在把之前两个笔记本里演示的对一个表进行数据清洗的代码删除，只保留对所有表进行数据清洗的代码
+storagemount是我们连接储存账户的笔记本，这个不用管，我们只需要在adf pipeline里运行bronze to silver和silver to gold
+我们在adf中新建一个link service connection 来连接adf和databricks
+我们选择现有交互式群集，可以直接用databricks我们现有的
+身份验证类型 我们选择access token 我们去databricks页面点击name，然后点击user setting - 开发者 -访问令牌 -创建新令牌
+然后我们创建了新的token 复制令牌 
+现在我们把刚生成的token存在keyvalue vault里，然后连接服务选token，选择azure key vault连接，选对应的AKV 链接服务和机密名称即可
+然后选择点击 ‘从现有群集中选择’ 选择我们此前在databricks中创建的集群datatransformation
+选好以后我们点击测试连接，连接成功我们点击创建。
+现在我们的adf可以访问databricks里的所有笔记本。我们点击全部发布
+一、Databricks Linked Service 的两种常用 Cluster 类型
+1. 现有交互式群集（Existing Interactive Cluster）
+✅ 优点：
+群集已启动，作业执行快（启动时间几乎为0）；适合调试、开发环境；在 Udemy 课程中讲的是项目演示，老师选这个是因为方便演示；
+⚠️ 缺点：
+手动管理群集（需提前启动），不适合自动化生产；群集空闲可能会被 Azure 停止。
+2. 作业群集（Job Cluster）
+✅ 优点：
+每次运行 Pipeline 时，ADF 自动临时创建一个群集，任务结束自动删除；更适合 生产自动化任务（自动清理资源、节省成本）；
+⚠️ 缺点：
+每次执行前需要等待群集启动（一般30秒~2分钟）；设置稍复杂，要提供完整的 Databricks Runtime 配置。
+二、身份验证方式（Authentication Type）区别
+Access token	手动生成的访问令牌（personal access token, PAT）	✅ 开发、测试	较安全（时间限制）	从 Databricks UI 中手动生成
+Azure Managed Identity（MSI）	使用 ADF 的系统托管身份或用户托管身份进行认证	✅ 推荐用于生产	更安全（不暴露密码或token）	需要在 Azure 中配置权限
+
+
+    # 获取机密名称失败的潜在原因：
+        注意在我们创建azure key vault的时候，机密权限（Secret permissions）：应该确保勾选了至少 Get 和 List；，
+        ✅ 勾选Get → 允许读取指定名称的机密值
+        但是没有勾选：❌ List 就不能列出所有机密名称
+        只勾选了 Get，没有 List，导致 ADF 知道 key 的名字但无法访问它的值或列出机密，最终报错 Forbidden。
+        现在只要把 List 加上，重新保存访问策略，再测试连接，💡 一切就通了。
+涉及到敏感的值、密码等都应该通过这种方式去建立link service访问key vault去进行连接
+
+
+接下来我们要在adf中创建两个notebook活动，一个是bronze to silver 一个是silver to gold notebook类型选择databricks
+创建好了后把foreach活动成功后连接上bronze to silver 然后我们点击笔记本下的azure databircks Databricks 链接服务*选择刚才创建的连接
+setting 的笔记本路径选择databricks里我们两个笔记本的路径
+bronze to silver成功后连接上silver to gold
+
+然后我们可以点击发布全部更改保存我们的pipeline
+然后可以触发。由于我们之前在databricks 的notebook里写的代码是df.write.format('delta').mode('overwrite').save(output_path)
+mode('overwrite')是覆写，因此我们可以直接运行，数据会把原来旧的覆盖掉。
+我们在管道运行的时候，可以检查进度，点击活动旁边的glass眼镜模样的标志。
+我们可以去data lake检查，可以发现delta文件增加了一个一模一样的。这是delta的功能。可以追踪更改历史记录。因此delta是被推荐存储在azure data lake上的推荐数据存储格式
+
+三、Data loading
+Azure Synapse 自动化建视图流程（Gold层 → Serverless SQL Views）
+🎯 目标：
+从 Azure Data Lake 的 Gold 层（/gold/SalesLT/） 获取所有子目录（每个代表一个 Delta 表），
+为每个表自动在 Serverless SQL DB 中创建视图，实现全自动“读取型数据集市”连接。
+
+
+接下来我们可以把处理好的gold层数据存入Azure Synapse Analytics数据库
+对于我们现在结构清晰数据量小的项目，我们选择建立无服务器的sql database即可
+我们的数据已经储存在数据湖中，我们可以使用内置sql池直接从数据湖中查数据
+我们点data 下面的link可以看到数据湖，其中有我们创建的金银铜三层数据，点击gold-SalesLT可以看见清洗好的表格
+如果只想查询某个表，可以右键点击表格，我们可以看到有一些选项可以执行sql脚本 比如查询前100行，会询问我们文件类型，我们选择delta
+它自动连接到内置数据库
+这样它就自动生成了sql代码：
+-- This is auto-generated code
+SELECT
+    TOP 100 *
+FROM
+    OPENROWSET(
+        BULK 'https://datalake4project.dfs.core.windows.net/gold/SalesLT/Address/',
+        FORMAT = 'DELTA'
+    ) AS [result]
+
+运行就可以得到查询的数据
+在数据湖中存储数据比sql专用数据库便宜很多
+我们把刚生成的代码改成：
+
+CREATE VIEW address
+AS
+SELECT
+    *
+FROM
+    OPENROWSET(
+        BULK 'https://datalake4project.dfs.core.windows.net/gold/SalesLT/Address/',
+        FORMAT = 'DELTA'
+    ) AS [result]
+
+我们创建一个视图，视图（View）：是一种虚拟表，本质上是保存了一个查询结果的定义，用户可以像查询表一样查询它。
+    # 各部分含义
+        1 OPENROWSET(...)
+        是 Synapse 中用来读取外部数据源（例如 ADLS）的函数。
+        2 BULK 'https://.../SalesLT/Address/'
+        表示从 Azure Data Lake Storage (ADLS Gen2) 读取路径为 gold/SalesLT/Address/ 下的数据。
+        这个路径是一个目录，其中存放的是 Delta Lake 格式 的文件（例如 .parquet, _delta_log 等）。
+        3 FORMAT = 'DELTA'
+        告诉 Synapse 这个目录下的数据使用的是 Delta Lake 格式，这是一种支持事务的表格式，常用于大数据处理（通常和 Databricks 一起用）。
+        4 AS [result]
+        为 OPENROWSET 返回的数据起个别名叫 result，后续查询中可以使用它（这里直接 SELECT *，没用到别名）。
+        创建一个名为 address 的视图，它的内容来自于 Azure Data Lake 中路径为 gold/SalesLT/Address/ 的一个 Delta 格式数据集。
+        使用这个视图后，你就可以直接查询 SELECT * FROM address，而不必每次都写 OPENROWSET(...)。
+    # 开头的AS是干什么用的：
+        AS 的含义是什么？简单说就是“请帮我创建一个叫 address 的虚拟表，它的内容等于下面这条 SELECT 查询的结果。”
+        在 CREATE VIEW ... AS 中，AS 的意思是：“定义这个视图的内容是下面这条 SELECT 查询的结果。”
+        换句话说：
+        CREATE VIEW address 是在说：“我要创建一个叫 address 的视图”
+        AS 起到了“赋值”的作用
+        SELECT ... 是你要定义的视图的查询内容
+
+接下来我们在右上角要把连接的数据库从master改成gold_db 运行这段查询，显示成功后去workspace找到下面的sql database - views - dbo.address
+可以看见我们刚创建的视图
+    # dbo是什么？
+        dbo.address 中的 dbo.，其实是 SQL Server 和 Synapse 中的一个默认架构（schema）名称
+        dbo 是 "database owner" 的缩写，是 SQL Server 系统中默认的数据库架构（schema）名称。
+        在 SQL Server 或 Azure Synapse 中，一个数据库中的对象（表、视图、存储过程等）都有属于自己的 schema（架构），
+        而 dbo 就是其中最常见、默认使用的那个。
+然后我们选择查询dbo.address的前100行，执行
+如果数据湖中的表格被修改加入新列之类的，这个视图也会随之改变
+
+现在我们不满足是给address表建立视图，我们要用pipeline动态的为所有表建立视图
+我们知道Azure synapse analytic是建立在adf之上，所以我们无需在adf里建立pipeline而是直接在azure synapse analytic里建
+在develop中我们可以写sql脚本用来动态储存gold中的表的视图：
+代码：
+
+USE gold_db # 使用数据库 gold_db（即在这个数据库下执行下面的操作）
+GO # 表示执行上面那条语句（在 SSMS / Synapse 中用于分段执行）
+CREATE OR ALTER PROC CreateSQLServerLessView_gold @ViewName NVARCHAR(100) 
+# 创建或修改一个名为 CreateSQLServerLessView_gold 的存储过程 参数：@ViewName 是你传入的视图名，比如 'Address' 
+AS 
+BEGIN # 存储过程体开始
+    DECLARE @statement NVARCHAR(MAX);
+# 声明一个变量 @statement，类型是 nvarchar(max)，用于存储动态 SQL 语句
+    SET @statement = 
+        N'CREATE OR ALTER VIEW ' + QUOTENAME(@ViewName) + N' AS
+        SELECT * 
+        FROM OPENROWSET(
+            BULK ''https://datalake4project.dfs.core.windows.net/gold/SalesLT/' + @ViewName + '/'',
+            FORMAT = 'DELTA'
+        ) AS [result]';
+
+    EXEC(@statement); # 执行你上面动态拼接出来的 SQL 语句
+END
+GO # 结束存储过程定义
+进一步解释
+    # 一、PROC 是什么意思？
+PROC 是 PROCEDURE 的简写。在 SQL 中：是在创建一个存储过程（Stored Procedure）。
+存储过程（Stored Procedure）是一段可以被反复调用的 SQL 脚本，你可以把它理解为“数据库中的函数”。
+存储过程存在于数据库中，可以接收参数，可以封装逻辑（如创建视图、插入数据、更新等），可以被反复执行
+在这里它就是一个用来动态创建视图的自动化工具函数。
+# 二、@ViewName NVARCHAR(100) 是什么意思？
+这是这个存储过程的一个输入参数定义，我们逐部分讲：
+CreateSQLServerLessView_gold 是过程名
+@ViewName	这是参数的名字，代表你传进去的“视图名称”
+NVARCHAR(100)	表示这个参数的数据类型是 Unicode 字符串，最大长度是 100 个字符
+就像函数要接收参数一样，存储过程也可以接收参数，@ViewName 就是你定义的这个“变量名”。
+
+
+# 三、为什么是 NVARCHAR 而不是 VARCHAR？
+在 Azure Synapse 和现代 SQL Server 中，推荐用 NVARCHAR 以确保兼容各种语言字符。
+
+| 类型              | 全称                                    | 是否支持 Unicode（多语言）    | 字符占用空间     | 场景                               |
+| --------------- | ------------------------------------- | -------------------- | ---------- | -------------------------------- |
+| VARCHAR(MAX)  | Variable-length ASCII character       | ❌ 只支持 ASCII 字符       | 每个字符占 1 字节 | 英文、数字、ASCII 符号为主的场景              |
+| NVARCHAR(MAX) | Variable-length Unicode character | ✅ 支持中文、日文、emoji、特殊符号 | 每个字符占 2 字节 | 推荐用于动态 SQL、多语言环境、云平台（如 Synapse）中 |
+max是什么
+| 类型              | 最大长度               | 实际用途                          |
+| --------------- | ------------------ | ----------------------------- |
+| NVARCHAR(100) | 最多 100 个字符         | 常用于列名、名字、代码等                  |
+| NVARCHAR(MAX) | 最多 2^31-1 个字符（2GB） | 用于存储大文本、大 SQL 语句、大 JSON、大 XML |
+
+# 四、什么是 @statement？
+在 SQL 中，我们需要先用一个变量来“装下”要执行的 SQL 代码文本，这个变量名就是 @statement。
+在代码中，@statement 通常会被 EXEC(@statement) 运行。
+DECLARE @statement NVARCHAR(MAX) 这句声明了一个变量 @statement，类型是 NVARCHAR(MAX)，用来存储一段 SQL 语句（也就是字符串）。
+
+# 五、什么是 SET @statement = N'...'？ 为什么加个 N？
+这是为了给变量 @statement 赋值，值就是一段用字符串写出的 SQL 语句。
+N 是 National character 的意思，是 T-SQL 中Unicode 字符串的前缀。
+表示这是一个 Unicode 字符串，可以支持中文、日文、韩文、emoji 等多语言字符。
+变量类型是 NVARCHAR，赋值时必须用 N'...'，否则 SQL Server 会尝试做类型转换，有时候可能导致失败或字符丢失。
+
+# 六、QUOTENAME(@ViewName) 的作用是什么？
+N'create or alter view' 只是简单拼接 + @ViewName + —— 这是可以执行的，但如果你传入的视图名中有 特殊字符、空格、保留字或非标准格式，就可能报错！
+QUOTENAME() 是 SQL Server 提供的一个函数，用来：给对象名（表名、字段名、视图名等）自动加上方括号 []，避免语法冲突或 SQL 注入风险。
+
+# 七、为什么要写成as [result] 而不是as result？
+别名是保留字（如 order, select, result）	✅ 必须加中括号或引号
+在 SQL Server 和 Synapse 中，如果别名是 保留字、可能与关键字冲突、或包含特殊字符/大小写，就必须用中括号 [] 括起来。
+
+# 八、FORMAT = ''DELTA''	✅	必须双写单引号，表示 SQL 字符串内的文本
+
+我们执行并发布更改
+点击链接服务，新建azure sql database 
+账户选择方法我们选择Enter manually
+然后去synapse-workspace-for-data-engineer-project 设置找到属性下面有无服务器 SQL 终结点，复制并粘贴到完全限定的域名
+数据库名称 gold_db
+身份验证类型System-assigned managed identity 尝试连接创建发布更改
+
+接下来我们可以去创建pipeline了
+拿一个获取原数据的活动,改个名字，然后去设置里选择新建一个数据湖，新建一个二进制文件，起名字叫goldtables
+    # 用 Azure Synapse Analytics 的 Data Factory / Pipeline 工具 处理 Data Lake 数据，
+    并用 Get Metadata 获取文件信息，为什么新建数据集要选“二进制（Binary）” 类型？
+        遇到的问题场景总结：
+        Data Lake 的 Gold 层有很多 Delta 表（路径）
+        想通过 Synapse Pipeline 把它们“转成” SQL Serverless 视图（在 SQL DB 中查看）
+        想用 Get Metadata 自动获取这些表的路径或子文件夹名，动态建视图
+        Get Metadata 新建数据集的时候提示必须选 Binary 数据集
+
+        因为 Get Metadata 并不读取文件内容，而是读取“文件本身的元数据”（如文件名、大小、修改时间等），
+        而这不依赖文件的格式（Parquet/CSV/Delta），所以必须选 Binary。
+
+       
+
+直接选择数据湖的连接synapse-workspace-for-data-engineer-project-WorkspaceDefaultStorage
+路径选gold-SalesLT 新建
+然后我们在设置这里字段列表下新建选一个child item的参数，这样可以获得所有 SalesLT下的子项 调试一下可以成功
+然后我们再添加一个foreach活动 设置里我们选原数据动态获得内容然后点子项@activity('Get tablenames').output.childItems
+这样可以将整个数组传递给每个循环。然后我们点编辑foreach活动，添加Stored procedure活动
+设置里选连接serverlessSQLdb，存储过程名称选之前创建的dbo].[CreateSQLServerLessView_gold]
+存储过程参数 新建一个名字是我们sql代码中的ViewName 类型string 值因为我们是for each活动所以选择动态添加 @item().name
+
+现在我们可以发布并运行这个管道
+
+# 流程步骤汇总
+🔹1. 新建一个 Synapse Pipeline
+🔹2. 添加 Get Metadata 活动（命名为：Get tablenames）
+连接服务：选择你默认的数据湖存储（如 synapse-workspace-for-data-engineer-project-WorkspaceDefaultStorage）
+路径：设置为 gold/SalesLT（这是你的 Gold 层）
+字段列表：点击添加 → 选择 child items
+✅ 这个设置的作用是：获取 SalesLT 文件夹下的所有子目录名（即所有 Delta 表名）
+🔹3. 添加 ForEach 活动
+名称：ForEach - create views
+Items 设置：点击右上角的小动态表达式图标，输入：
+@activity('Get tablenames').output.childItems
+✅ 这句表示获取 Get tablenames 输出的所有子项（如 Address、Customer、Product 等）
+🔹4. 编辑 ForEach 内部：添加 Stored Procedure 活动
+名称：Create View
+Linked service：选择你连接的 Serverless SQL DB（比如 serverlessSQLdb）
+Stored procedure name：选择你已创建的过程：[dbo].[CreateSQLServerLessView_gold]
+这个就是前面写的 SQL 脚本创建的存储过程：ForEach 就会逐个循环每个表名（如 Address, Customer...）。
+在 ForEach 内的 Stored Procedure 活动中：参数名称：ViewName 类型：String 值设为：@item().name
+➡️ 表示当前循环到的 Delta 表名（子文件夹名）将被作为参数 @ViewName 传给过程。
+🔹5. 设置存储过程参数
+新建参数：
+参数名：ViewName（必须与你过程定义中的参数名一致）
+类型：String
+值：点击动态表达式图标，输入：@item().name
+✅ 这句表示从当前 ForEach 循环中的每一个子项，取其名称作为视图名。
+✅ 6. 发布并运行
+点击 发布（Publish），然后 手动触发运行（Trigger now）
+每个子文件夹下的 Delta 表将自动在 SQL 数据库中创建一个视图
+如SalesLT/Address/ → 创建视图 [Address]
+如SalesLT/Product/ → 创建视图 [Product]
+在SQL Serverless 数据库中可以看到这些视图，直接 SELECT * FROM [Address] 即可查询 Delta 表
+
+Pipeline 会自动完成以下操作：
+| 步骤 | 操作                                                 
+| --- | -------------------------------------------------- 
+| 1️⃣ | 遍历 gold/SalesLT/ 下所有子文件夹名                        
+| 2️⃣ | 对每个子表名调用一次 CreateSQLServerLessView_gold         
+| 3️⃣ | 存储过程接收这个表名，拼接 SQL 语句                               
+| 4️⃣ | 动态创建视图，例如 CREATE OR ALTER VIEW [Customer] AS ... 
+| ✅   | 整个过程实现“批量建视图”的自动化逻辑          
+
+一、项目一句话介绍（英文/中文双语）
+🔹 英文：
+"Designed and implemented a metadata-driven data ingestion pipeline in Azure Synapse to automatically create Serverless SQL views from Delta tables stored in the Data Lake Gold layer, enabling easy querying and downstream BI integration."
+🔹 中文：
+在 Azure Synapse 中设计并实现了一个元数据驱动的自动建视图流程，从 Data Lake Gold 层的 Delta 表中自动生成 Serverless SQL 视图，实现数据湖的结构化建模和高效查询接入。
+✅ 二、你项目的主要组成部分（结构讲法）
+面试讲的时候可以用 STAR（情况-任务-行动-结果）结构来讲：
+🔸 Situation（背景）：
+公司/学习项目中，我需要将 Data Lake 中的 Gold 层数据暴露给数据分析师查询，同时避免他们直接处理原始路径和 Delta 文件结构。
+🔸 Task（任务）：
+我的目标是搭建一个自动化流程，根据 Gold 层中的 Delta 表目录，动态创建对应的 Serverless SQL 视图，做到数据湖向 SQL 层的结构化抽象，并保证未来能动态扩展和维护。
+🔸 Action（我做了什么）：
+使用 Azure Synapse Pipelines 中的 Get Metadata 活动，获取 /gold/SalesLT/ 下所有 Delta 表子文件夹（如 Address、Customer）。
+使用 ForEach 循环逐个读取表名，并调用我自定义的 存储过程 CreateSQLServerLessView_gold，该过程通过 OPENROWSET + FORMAT='DELTA' 拼接动态 SQL，创建视图。
+每个子文件夹即对应一个 Delta 表目录，自动生成如 [Address], [Customer] 等 Serverless SQL 视图。
+所有视图存储在 Serverless SQL DB 中，供分析师通过 SQL 查询使用，实现与 Power BI 和 Azure ML 的无缝对接。
+🔸 Result（成果）：
+减少了 100% 的手动视图创建工作量
+实现了数据湖到 SQL 语义层的自动对接
+提高了数据建模效率，降低了误操作和重复劳动
+支持未来任意添加新表，系统会自动同步建视图
+
+
+
+
+Data Reporting using Power BI
+
+安全和治理 
+创建安全的资源组和分配适当的权限对于做任何实时数据工程的项目都非常重要
+之前我们用了azure key vault存储密码，现在我们尝试使用Azure Active Directory进行访问控制
+我们看data-engineering-projects | 访问控制(标识和访问管理) ｜角色分配 
+这里只有我自己的一个账户可以访问这个资源组，但在实时的数据工程项目中，实际上会有多个工程师同时在线上进行操作
+但如果我们手动的一个个添加他们在这里费时费力，因此我们需要使用azure active directory
+
+Azure Active Directory（Azure AD） 是微软提供的一种云端身份与访问管理服务，主要用于：
+一、身份验证与用户管理
+Azure AD 是企业管理用户身份的核心平台，它可以：
+管理员工、合作伙伴、客户的身份信息
+支持用户登录各种服务（如 Microsoft 365、Azure、Teams、SharePoint 等）
+提供 单点登录（Single Sign-On, SSO），用户登录一次就可以访问多个服务
+✅ 二、权限控制与安全策略
+Azure AD 可以对不同用户设定不同的权限，常见功能包括：
+多重身份验证（MFA）：提高账户安全
+条件访问（Conditional Access）：根据用户位置、设备状态、风险等级等动态判断是否允许访问
+角色分配（RBAC）：为用户赋予特定角色（如读者、管理员）
+✅ 三、应用集成
+支持集成成千上万种 SaaS 应用（如 Salesforce、Zoom、Dropbox）
+也支持企业自建的应用（Web App、API）使用 Azure AD 认证
+OAuth、OpenID Connect、SAML 等标准协议都可以支持
+✅ 四、设备与资源接入
+Azure AD 还可以用来管理：
+登录 Windows 10/11 的设备（Azure AD Join）
+通过 Intune 统一配置和管理设备策略
+✅ 五、与本地 AD 集成（Hybrid）
+如果企业以前使用的是 本地 Active Directory（传统AD），Azure AD 可以：
+通过 Azure AD Connect 同步用户和密码
+实现混合身份环境（Hybrid Identity）
+📌 举个例子
+假设你在一家公司工作，你每天需要：
+登录 Outlook 查看邮件
+登录 Power BI 查看报表
+登录 Teams 开会
+这些操作都可以通过 Azure AD 实现单点登录和统一权限控制，管理员也可以通过 Azure AD 查看日志、强制你启用 MFA、限制你只能在公司电脑登录。
+
+我们把新人添加至Azure AD中，新人就可以获得所需要的访问权限
+现在我们在home中点击azure active directory 创建组选择我们的账号
+回到data-engineering-projects | 访问控制(标识和访问管理) ｜ 点add ｜添加contributor选择新人｜之后新人就有访问这个资源组的权限了
+
+
+end to end pipeline text
+一旦我们在sql server database更改数据加入row等，我们运行管道的话数据将会自动执行etl流程，最终在powerbi展示
+在我们之前的学习中，不管是debug还是add trigger都是手动的只运行一次，但在真正的实时项目中都是应该自动运行的，
+因此我们点击add trigger点击new edit 添加new trigger 起一个新名字scheduled_trigger
+type选schedule 指定开始时间和时区，然后可以设置每一天重复一次
+如果我们在sql数据库里修改了信息，那么到时数据管道自动执行会自动在整个流程上更新数据
